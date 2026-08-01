@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,7 +16,15 @@ import (
 
 // maxRequestBodyBytes limits telemetry payloads to 64 KiB to protect the API
 // from unexpectedly large request bodies.
-const maxRequestBodyBytes = 64 * 1024
+const (
+	maxRequestBodyBytes = 64 * 1024
+	readinessTimeout    = 2 * time.Second
+)
+
+// ReadinessChecker represents a dependency required to serve real traffic.
+// The API depends on this abstraction rather than directly on PostgreSQL,
+// which keeps HTTP behavior easy to test.
+type ReadinessChecker func(context.Context) error
 
 // statusResponse is the JSON shape returned by the health and readiness
 // endpoints.
@@ -39,7 +48,7 @@ type telemetryValidationResponse struct {
 
 // New function is the HTTP application constructor and ensures that server
 // limits and the health, readiness, and telemetry routes are configured.
-func New(startedAt time.Time) *fiber.App {
+func New(startedAt time.Time, readinessChecker ReadinessChecker) *fiber.App {
 	app := fiber.New(fiber.Config{
 		AppName: "F1SignalForge",
 
@@ -63,18 +72,12 @@ func New(startedAt time.Time) *fiber.App {
 		})
 	})
 
-	// GET /readyz is the readiness endpoint; it reports whether the service can
-	// accept traffic. It currently has no external dependency to verify.
-	app.Get("/readyz", func(c fiber.Ctx) error {
-		// No external dependency exists yet. Once PostgreSQL is introduced,
-		// this endpoint will verify database connectivity before returning ready.
-		return c.Status(fiber.StatusOK).JSON(statusResponse{
-			Status: "ready",
-		})
-	})
+	// GET /readyz is the readiness endpoint;
+	// it confirms that the API can use its required dependencies.
+	app.Get("/readyz", handleReadiness(readinessChecker))
 
-	// POST /v1/telemetry accepts one JSON telemetry event for decoding and
-	// validation before persistence is added.
+	// POST /v1/telemetry accepts one JSON object per request and validates its fields.
+	// It does not persist events.
 	app.Post("/v1/telemetry", handleTelemetry)
 
 	return app
@@ -139,4 +142,35 @@ func decodeTelemetry(c fiber.Ctx) (telemetry.Event, error) {
 	}
 
 	return event, nil
+}
+
+// handleReadiness reports whether the API can use its required dependencies.
+// Kubernetes will later use this endpoint to decide whether a pod should
+// receive traffic from the Service.
+func handleReadiness(readinessCheck ReadinessChecker) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		if readinessCheck == nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(statusResponse{
+				Status: "not ready",
+			})
+		}
+
+		checkContext, cancel := context.WithTimeout(
+			context.Background(),
+			readinessTimeout,
+		)
+		defer cancel()
+
+		if err := readinessCheck(checkContext); err != nil {
+			// Do not expose database errors to callers; they may reveal
+			// infrastructure details while adding no value to a load balancer.
+			return c.Status(fiber.StatusServiceUnavailable).JSON(statusResponse{
+				Status: "not ready",
+			})
+		}
+
+		return c.JSON(statusResponse{
+			Status: "ready",
+		})
+	}
 }

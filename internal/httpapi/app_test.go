@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,7 +19,9 @@ import (
 func TestOperationalEndpoints(t *testing.T) {
 	// Build the application once so every endpoint case uses the same routing
 	// configuration as the running service.
-	app := New(time.Now())
+	app := New(time.Now(), func(context.Context) error {
+		return nil
+	})
 
 	// Keep endpoint inputs and expected results together so the same assertions
 	// can be reused for both operational routes.
@@ -84,7 +88,9 @@ func TestOperationalEndpoints(t *testing.T) {
 // valid requests succeed while malformed or invalid requests are rejected.
 func TestTelemetryEndpoint(t *testing.T) {
 	// Build the application once so every case exercises the real route setup.
-	app := New(time.Now())
+	app := New(time.Now(), func(context.Context) error {
+		return nil
+	})
 
 	// Each case defines a request and the status and response text it must
 	// produce.
@@ -194,5 +200,31 @@ func TestTelemetryEndpoint(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// TestReadinessEndpointReturnsServiceUnavailableWhenDatabaseIsDown function is the
+// readiness-route test and ensures that the endpoint returns a 503 Service Unavailable
+// status when the database is unreachable.
+func TestReadinessEndpointReturnsServiceUnavailableWhenDatabaseIsDown(t *testing.T) {
+	t.Parallel()
+
+	app := New(time.Now(), func(context.Context) error {
+		return errors.New("database unavailable")
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	response, err := app.Test(request, fiber.TestConfig{})
+	if err != nil {
+		t.Fatalf("app.Test() error = %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"status = %d, want %d",
+			response.StatusCode,
+			http.StatusServiceUnavailable,
+		)
 	}
 }
