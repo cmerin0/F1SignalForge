@@ -1,0 +1,73 @@
+name: Continuous_Integration
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
+      - develop
+
+# CI checks source code only; it does not need write access to the repository.
+permissions:
+  contents: read
+
+# Cancel an older run when a newer commit is pushed to the same branch.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-quality:
+    name: Go quality checks
+    runs-on: ubuntu-latest
+    # Stop the job if the quality checks take too long.
+    timeout-minutes: 5
+
+    steps:
+      # Download the repository contents onto the runner.
+      - name: Check out source code
+        uses: actions/checkout@v6
+
+      # Install the Go version declared by go.mod and enable dependency caching.
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Regenerate module metadata and fail if it creates uncommitted changes.
+      - name: Verify module files are tidy
+        run: |
+          # Update go.mod and go.sum from the current dependency graph.
+          go mod tidy
+          # Ensure the repository already contains the tidy module files.
+          git diff --exit-code -- go.mod go.sum
+
+      # Find Go files that are not formatted with the standard formatter.
+      - name: Verify Go formatting
+        run: |
+          # List every unformatted Go file, excluding vendored dependencies.
+          unformatted_files="$(find . -type f -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l)"
+
+          # Fail the check when gofmt reports any files needing formatting.
+          if [ -n "$unformatted_files" ]; then
+            echo "These files are not formatted:"
+            echo "$unformatted_files"
+            exit 1
+          fi
+
+      # Detect suspicious constructs and possible mistakes with go vet.
+      - name: Run static analysis
+        run: go vet ./...
+
+      # Run all tests while checking for data races.
+      - name: Run unit tests with the race detector
+        run: go test -race ./...
+
+      # Confirm that the production API package can be compiled.
+      - name: Verify the Fiber API builds
+        run: go build -trimpath -o /tmp/f1signalforge-api ./cmd/api
