@@ -11,8 +11,10 @@ import (
 	"github.com/cmerin0/F1SignalForge/internal/httpapi"
 )
 
-const defaultListenAddress = ":8080"
-const shutdownTimeout = 10 * time.Second
+const (
+	defaultListenAddress = ":8080"
+	shutdownTimeout      = 10 * time.Second
+)
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
