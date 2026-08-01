@@ -12,11 +12,15 @@ import (
 )
 
 const (
+	// Use port 8080 when LISTEN_ADDR is not provided by the environment.
 	defaultListenAddress = ":8080"
-	shutdownTimeout      = 10 * time.Second
+	// Give active requests up to ten seconds to finish during shutdown.
+	shutdownTimeout = 10 * time.Second
 )
 
 func main() {
+	// Emit structured JSON logs so startup and shutdown events are easy to
+	// search and consume in a container environment.
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	// Kubernetes sends SIGTERM before ending a pod. Converting it to a context
@@ -28,30 +32,39 @@ func main() {
 	)
 	defer stop()
 
+	// Read the bind address from the environment, falling back to the default
+	// address used by the local development and container setup.
 	listenAddress := os.Getenv("LISTEN_ADDR")
 	if listenAddress == "" {
 		listenAddress = defaultListenAddress
 	}
 
+	// Build the Fiber application and record its creation time for /healthz.
 	app := httpapi.New(time.Now())
 
 	logger.Info("starting Fiber API", "address", listenAddress)
 
 	serverErrors := make(chan error, 1)
 
+	// Run the blocking Fiber listener in the background so main can also wait
+	// for an operating-system shutdown signal.
 	go func() {
 		logger.Info("starting Fiber API", "address", listenAddress)
 		serverErrors <- app.Listen(listenAddress)
 	}()
 
+	// Continue until the server fails or Kubernetes/the operating system asks
+	// the process to terminate.
 	select {
 	case err := <-serverErrors:
+		// A listener error is unexpected unless it is caused by normal shutdown.
 		if err != nil {
 			logger.Error("Fiber API stopped unexpectedly", "error", err)
 			os.Exit(1)
 		}
 
 	case <-gracefulContext.Done():
+		// A shutdown signal starts the bounded graceful-shutdown sequence.
 		logger.Info("shutdown signal received")
 
 		shutdownContext, cancel := context.WithTimeout(
