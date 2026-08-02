@@ -9,7 +9,7 @@ import (
 	"github.com/cmerin0/F1SignalForge/internal/telemetry"
 )
 
-const samplesPerLap = 120
+const samplesPerLap = 100
 
 // NormalLapGenerator produces a repeatable approximation of normal on-track
 // behavior: braking zones, acceleration, varying gears, and gradual fuel use.
@@ -35,6 +35,9 @@ func NewNormalLapGenerator(carNumber int) (*NormalLapGenerator, error) {
 // measurement pattern. Deterministic scenarios are important because they make
 // incidents reproducible during load, Kubernetes, and failure testing.
 func (generator *NormalLapGenerator) Next(observedAt time.Time) telemetry.Event {
+	// lapPosition is a normalized value between 0 and 1 that represents the
+	// car's position in the lap. It is used to calculate speed, acceleration,
+	// and steering angle.
 	lapPosition := float64(generator.sequence%samplesPerLap) / samplesPerLap
 
 	// acceleration ranges from 0 at a braking zone to 1 on a straight.
