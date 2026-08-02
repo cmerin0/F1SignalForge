@@ -71,3 +71,40 @@ jobs:
       # Confirm that the production API package can be compiled.
       - name: Verify the Fiber API builds
         run: go build -trimpath -o /tmp/f1signalforge-api ./cmd/api
+
+  container-build:
+    name: Container builds
+    needs: go-quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build API image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: api
+          push: false
+          pull: true
+          tags: f1signalforge-api:ci
+          cache-from: type=gha,scope=f1signalforge-api
+          cache-to: type=gha,mode=max,scope=f1signalforge-api
+
+      - name: Build simulator image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: simulator
+          push: false
+          pull: true
+          tags: f1signalforge-simulator:ci
+          cache-from: type=gha,scope=f1signalforge-simulator
+          cache-to: type=gha,mode=max,scope=f1signalforge-simulator
