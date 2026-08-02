@@ -44,8 +44,9 @@ jobs:
         run: |
           # Update go.mod and go.sum from the current dependency graph.
           go mod tidy
+          go mod vendor
           # Ensure the repository already contains the tidy module files.
-          git diff --exit-code -- go.mod go.sum
+          git diff --exit-code -- go.mod go.sum vendor
 
       # Find Go files that are not formatted with the standard formatter.
       - name: Verify Go formatting
