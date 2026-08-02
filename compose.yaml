@@ -1,4 +1,26 @@
 services:
+  api:
+    # Build a statically linked binary for the F1SignalForge API.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: f1signalforge-api:latest
+    container_name: f1signalforge-api
+
+    # Environment variables are passed to the container at runtime.
+    environment:
+      LISTEN_ADDR: ":8080"
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+
+    # Expose the API port to the host machine so it can be accessed from outside the container.
+    ports:
+      - "8080:8080"
+
+    # Wait for the PostgreSQL service to be healthy before starting the API service.
+    depends_on:
+      postgres:
+        condition: service_healthy
+        restart: true
   postgres:
     # Pin a major version so every developer uses a compatible database engine.
     image: postgres:18-alpine
