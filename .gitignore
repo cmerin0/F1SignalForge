@@ -17,3 +17,6 @@ dist/
 
 # REST Client generated files
 *.http
+
+# Vendor files
+vendor/

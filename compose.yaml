@@ -4,7 +4,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: f1signalforge-api:latest
+      target: api
+    image: f1signalforge-api:local
     container_name: f1signalforge-api
 
     # Environment variables are passed to the container at runtime.
@@ -21,6 +22,29 @@ services:
       postgres:
         condition: service_healthy
         restart: true
+
+  simulator:
+    # Build a statically linked binary for the F1SignalForge simulator.
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: simulator
+    image: f1signalforge-simulator:local
+    container_name: f1signalforge-simulator
+
+    # commands to run the simulator binary in a separate container if needed.
+    command: 
+      - "-api-url=http://api:8080"
+      - "-car-number=44"
+      - "-interval=1s"
+
+    # Wait for the api service to be healthy before starting the simulator service.
+    depends_on:
+      api:
+        condition: service_started
+
+    restart: unless-stopped
+
   postgres:
     # Pin a major version so every developer uses a compatible database engine.
     image: postgres:18-alpine

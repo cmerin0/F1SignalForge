@@ -12,24 +12,35 @@ ENV GOOS=linux
 
 # Copy dependency files first. Docker can reuse this layer when application
 # code changes without a dependency change.
-COPY go.mod go.sum ./
-RUN go mod tidy && go mod vendor
+COPY go.mod go.sum vendor ./
 
 # Build a statically linked Linux binary for a minimal runtime image.
 COPY . .
-RUN go build -trimpath -ldflags='-s -w' -o /out/f1sf-api ./cmd/api
+RUN go build -trimpath -ldflags='-s -w' -mod=vendor -o /out/f1sf-api ./cmd/api
+RUN go build -trimpath -ldflags='-s -w' -mod=vendor -o /out/f1sf-simulator ./cmd/simulator
 
 # Runtime stage: contains only the compiled application binary.
-FROM gcr.io/distroless/static-debian12:nonroot
+
+# api stage: used to run the F1SignalForge API.
+FROM gcr.io/distroless/static-debian12:nonroot AS api
 
 WORKDIR /app
 
-# Copy the statically linked binary from the build stage to the runtime stage.
 COPY --from=build /out/f1sf-api /app/f1signalforge-api
 
 EXPOSE 8080
 
-# The application never needs root privileges at runtime.
 USER nonroot:nonroot
 
 ENTRYPOINT ["/app/f1signalforge-api"]
+
+# simulator stage: used to run the F1SignalForge simulator.
+FROM gcr.io/distroless/static-debian12:nonroot AS simulator
+
+WORKDIR /app
+
+COPY --from=build /out/f1sf-simulator /app/f1signalforge-simulator
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["/app/f1signalforge-simulator"]
