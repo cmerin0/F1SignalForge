@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cmerin0/F1SignalForge/internal/database"
 	"github.com/cmerin0/F1SignalForge/internal/httpapi"
 )
 
@@ -16,12 +17,38 @@ const (
 	defaultListenAddress = ":8080"
 	// Give active requests up to ten seconds to finish during shutdown.
 	shutdownTimeout = 10 * time.Second
+	// Give the database up to ten seconds to respond during startup.
+	databaseConnectionTimeout = 10 * time.Second
 )
 
 func main() {
+
+	// Read the database URL from the environment. It is required for the service to start.
+	databaseURL := os.Getenv("DATABASE_URL")
+
 	// Emit structured JSON logs so startup and shutdown events are easy to
 	// search and consume in a container environment.
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	// Open a PostgreSQL connection pool and verify connectivity before starting the
+	// HTTP service. This ensures that the service does not report itself as healthy
+	// when it cannot serve requests.
+	databaseContext, cancelDatabaseConnection := context.WithTimeout(
+		context.Background(),
+		databaseConnectionTimeout,
+	)
+	defer cancelDatabaseConnection()
+
+	pool, err := database.NewPool(databaseContext, database.Config{
+		URL: databaseURL,
+	})
+	if err != nil {
+		logger.Error("could not connect to PostgreSQL", "error", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	telemetryRepository := database.NewTelemetryRepository(pool)
 
 	// Kubernetes sends SIGTERM before ending a pod. Converting it to a context
 	// gives Fiber a clean, testable signal to begin graceful shutdown.
@@ -40,7 +67,8 @@ func main() {
 	}
 
 	// Build the Fiber application and record its creation time for /healthz.
-	app := httpapi.New(time.Now())
+	// The readiness checker is passed to the application so it can be used by the readyz endpoint.
+	app := httpapi.New(time.Now(), pool.Ping, telemetryRepository)
 
 	logger.Info("starting Fiber API", "address", listenAddress)
 

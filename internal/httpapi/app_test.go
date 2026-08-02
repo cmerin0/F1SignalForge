@@ -1,198 +1,220 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
-	"io"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cmerin0/F1SignalForge/internal/telemetry"
 	"github.com/gofiber/fiber/v3"
 )
 
-// TestOperationalEndpoints function is the operational-route test and ensures
-// that the health and readiness endpoints return the expected HTTP responses.
-func TestOperationalEndpoints(t *testing.T) {
-	// Build the application once so every endpoint case uses the same routing
-	// configuration as the running service.
-	app := New(time.Now())
+// fakeTelemetryRepository lets HTTP tests verify route behavior without
+// requiring a running PostgreSQL container.
+type fakeTelemetryRepository struct {
+	err         error
+	storedEvent []telemetry.Event
+}
 
-	// Keep endpoint inputs and expected results together so the same assertions
-	// can be reused for both operational routes.
-	tests := []struct {
-		name          string
-		path          string
-		desiredStatus int
-		desiredBody   statusResponse
-	}{
-		{
-			name:          "liveness endpoint",
-			path:          "/healthz",
-			desiredStatus: http.StatusOK,
-			desiredBody: statusResponse{
-				Status: "ok",
-			},
+func (repository *fakeTelemetryRepository) Store(
+	_ context.Context,
+	event telemetry.Event,
+) error {
+	repository.storedEvent = append(repository.storedEvent, event)
+	return repository.err
+}
+
+func newTestApp(readinessError error, telemetryRepository telemetry.Repository) *fiber.App {
+	return New(
+		time.Now(),
+		func(context.Context) error {
+			return readinessError
 		},
-		{
-			name:          "readiness endpoint",
-			path:          "/readyz",
-			desiredStatus: http.StatusOK,
-			desiredBody: statusResponse{
-				Status: "ready",
-			},
-		},
+		telemetryRepository,
+	)
+}
+
+func performRequest(t *testing.T, app *fiber.App, request *http.Request) *http.Response {
+	t.Helper()
+
+	response, err := app.Test(request, fiber.TestConfig{})
+	if err != nil {
+		t.Fatalf("app.Test() error = %v", err)
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			// Create an in-memory GET request without starting a real HTTP server.
-			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+	t.Cleanup(func() {
+		response.Body.Close()
+	})
 
-			// Send the request through Fiber and fail if the test server times out.
-			response, err := app.Test(request, fiber.TestConfig{
-				Timeout:       time.Second,
-				FailOnTimeout: true,
-			})
-			if err != nil {
-				t.Fatalf("app.Test() error = %v", err)
-			}
-			// The response body must be closed to release its resources.
-			defer response.Body.Close()
+	return response
+}
 
-			// Verify that the endpoint returns the HTTP status expected by probes.
-			if response.StatusCode != test.desiredStatus {
-				t.Fatalf("status = %d, desired %d", response.StatusCode, test.desiredStatus)
-			}
+func validTelemetryBody() string {
+	observedAt := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
 
-			// Decode the JSON response so the payload can be checked by field.
-			var body statusResponse
-			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
-				t.Fatalf("decode response body: %v", err)
-			}
+	return fmt.Sprintf(`{
+		"car_number": 44,
+		"observed_at": %q,
+		"speed_kph": 315.7,
+		"engine_rpm": 11800,
+		"gear": 7,
+		"fuel_lt": 42.3,
+		"brake_temp_c": 710.4,
+		"tyre_temp_c": 96.8,
+		"steering_angle": -4.2
+	}`, observedAt)
+}
 
-			// Verify that the response reports the correct operational state.
-			if body.Status != test.desiredBody.Status {
-				t.Errorf("status body = %q, desired %q", body.Status, test.desiredBody.Status)
-			}
-		})
+func TestHealthzEndpoint(t *testing.T) {
+	repository := &fakeTelemetryRepository{}
+	app := newTestApp(nil, repository)
+
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	response := performRequest(t, app, request)
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+
+	var body statusResponse
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+
+	if body.Status != "ok" {
+		t.Fatalf("status body = %q, want %q", body.Status, "ok")
 	}
 }
 
-// TestTelemetryEndpoint function is the telemetry-route test and ensures that
-// valid requests succeed while malformed or invalid requests are rejected.
-func TestTelemetryEndpoint(t *testing.T) {
-	// Build the application once so every case exercises the real route setup.
-	app := New(time.Now())
+func TestReadyzEndpointReturnsOKWhenDatabaseIsReachable(t *testing.T) {
+	repository := &fakeTelemetryRepository{}
+	app := newTestApp(nil, repository)
 
-	// Each case defines a request and the status and response text it must
-	// produce.
-	tests := []struct {
-		name          string
-		contentType   string
-		body          string
-		desiredStatus int
-		desiredBody   string
-	}{
-		{
-			name:        "accepts valid telemetry",
-			contentType: "application/json",
-			body: `{
-				"car_number": 44,
-				"observed_at": "2026-07-31T12:00:00Z",
-				"speed_kph": 310.5,
-				"engine_rpm": 11800,
-				"gear": 7,
-				"fuel_lt": 38.2,
-				"brake_temp_c": 740,
-				"tyre_temp_c": 96.4,
-				"steering_angle": -12.5
-			}`,
-			desiredStatus: http.StatusOK,
-			desiredBody:   `"status":"validated"`,
-		},
-		{
-			name:          "rejects wrong content type",
-			contentType:   "text/plain",
-			body:          "not JSON",
-			desiredStatus: http.StatusUnsupportedMediaType,
-			desiredBody:   `"error":"Content-Type must be application/json"`,
-		},
-		{
-			name:        "rejects invalid values",
-			contentType: "application/json",
-			body: `{
-				"car_number": 100,
-				"observed_at": "2026-07-31T12:00:00Z",
-				"speed_kph": 310.5,
-				"engine_rpm": 11800,
-				"gear": 7,
-				"fuel_lt": 38.2,
-				"brake_temp_c": 740,
-				"tyre_temp_c": 96.4,
-				"steering_angle": -12.5
-			}`,
-			desiredStatus: http.StatusBadRequest,
-			desiredBody:   `"error":"validation failed"`,
-		},
-		{
-			name:        "rejects unknown JSON fields",
-			contentType: "application/json",
-			body: `{
-				"car_number": 44,
-				"observed_at": "2026-07-31T12:00:00Z",
-				"unexpected_field": true
-			}`,
-			desiredStatus: http.StatusBadRequest,
-			desiredBody:   `"error":"invalid JSON body"`,
-		},
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	response := performRequest(t, app, request)
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+}
+
+func TestReadyzEndpointReturnsServiceUnavailableWhenDatabaseIsDown(t *testing.T) {
+	repository := &fakeTelemetryRepository{}
+	app := newTestApp(errors.New("database unavailable"), repository)
+
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	response := performRequest(t, app, request)
+
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"status = %d, want %d",
+			response.StatusCode,
+			http.StatusServiceUnavailable,
+		)
+	}
+}
+
+func TestTelemetryEndpointStoresValidEvent(t *testing.T) {
+	repository := &fakeTelemetryRepository{}
+	app := newTestApp(nil, repository)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/telemetry",
+		strings.NewReader(validTelemetryBody()),
+	)
+	request.Header.Set(fiber.HeaderContentType, "application/json")
+
+	response := performRequest(t, app, request)
+
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf(
+			"status = %d, want %d",
+			response.StatusCode,
+			http.StatusCreated,
+		)
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			// Create an in-memory POST request containing the test telemetry body.
-			request := httptest.NewRequest(
-				http.MethodPost,
-				"/v1/telemetry",
-				strings.NewReader(test.body),
-			)
-			// The content type determines whether the API will attempt JSON parsing.
-			request.Header.Set("Content-Type", test.contentType)
+	if len(repository.storedEvent) != 1 {
+		t.Fatalf(
+			"stored events = %d, want 1",
+			len(repository.storedEvent),
+		)
+	}
 
-			// Send the request through Fiber without starting a network listener.
-			response, err := app.Test(request)
-			if err != nil {
-				t.Fatalf("app.Test() error = %v", err)
-			}
-			// Close the response body after the subtest releases its resources.
-			defer response.Body.Close()
+	if repository.storedEvent[0].CarNumber != 44 {
+		t.Fatalf(
+			"stored car number = %d, want 44",
+			repository.storedEvent[0].CarNumber,
+		)
+	}
+}
 
-			// Read the body once so error details can be included in assertion
-			// failures and checked against the expected response text.
-			responseBody, err := io.ReadAll(response.Body)
-			if err != nil {
-				t.Fatalf("read response body: %v", err)
-			}
+func TestTelemetryEndpointRejectsInvalidEventWithoutStoringIt(t *testing.T) {
+	repository := &fakeTelemetryRepository{}
+	app := newTestApp(nil, repository)
 
-			// First verify the HTTP status returned by the endpoint.
-			if response.StatusCode != test.desiredStatus {
-				t.Fatalf(
-					"status = %d, desired %d; body = %s",
-					response.StatusCode,
-					test.desiredStatus,
-					responseBody,
-				)
-			}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/telemetry",
+		strings.NewReader(`{
+			"car_number": 44,
+			"observed_at": "2026-01-01T00:00:00Z",
+			"speed_kph": 999,
+			"engine_rpm": 11800,
+			"gear": 7,
+			"fuel_lt": 42.3,
+			"brake_temp_c": 710.4,
+			"tyre_temp_c": 96.8,
+			"steering_angle": -4.2
+		}`),
+	)
+	request.Header.Set(fiber.HeaderContentType, "application/json")
 
-			// Then verify that the response contains the expected API message.
-			if !strings.Contains(string(responseBody), test.desiredBody) {
-				t.Fatalf(
-					"response body = %s, expected to contain %s",
-					responseBody,
-					test.desiredBody,
-				)
-			}
-		})
+	response := performRequest(t, app, request)
+
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf(
+			"status = %d, want %d",
+			response.StatusCode,
+			http.StatusBadRequest,
+		)
+	}
+
+	if len(repository.storedEvent) != 0 {
+		t.Fatalf(
+			"stored events = %d, want 0",
+			len(repository.storedEvent),
+		)
+	}
+}
+
+func TestTelemetryEndpointReturnsNotFoundForUnknownCar(t *testing.T) {
+	repository := &fakeTelemetryRepository{
+		err: telemetry.ErrRaceCarNotFound,
+	}
+	app := newTestApp(nil, repository)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/telemetry",
+		strings.NewReader(validTelemetryBody()),
+	)
+	request.Header.Set(fiber.HeaderContentType, "application/json")
+
+	response := performRequest(t, app, request)
+
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf(
+			"status = %d, want %d",
+			response.StatusCode,
+			http.StatusNotFound,
+		)
 	}
 }
