@@ -20,6 +20,7 @@ type Repository interface {
 // and avoids requiring PostgreSQL for route-level tests.
 type RepositoryFunc func(context.Context, Event) error
 
+// Store method calls the adapted function with the given context and event.
 func (function RepositoryFunc) Store(ctx context.Context, event Event) error {
 	return function(ctx, event)
 }
