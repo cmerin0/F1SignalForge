@@ -18,18 +18,29 @@ import (
 // fakeTelemetryRepository lets HTTP tests verify route behavior without
 // requiring a running PostgreSQL container.
 type fakeTelemetryRepository struct {
-	err         error
-	storedEvent []telemetry.Event
+	err             error
+	storedEvent     []telemetry.Event
+	latestEvent     telemetry.Event
+	latestErr       error
+	latestCarNumber int
 }
 
-func (repository *fakeTelemetryRepository) Store(
-	_ context.Context,
-	event telemetry.Event,
-) error {
+// Store satisfies telemetry.Repository for HTTP route tests.
+func (repository *fakeTelemetryRepository) Store(_ context.Context, event telemetry.Event) error {
 	repository.storedEvent = append(repository.storedEvent, event)
 	return repository.err
 }
 
+// Latest satisfies telemetry.Repository for HTTP route tests.
+func (repository *fakeTelemetryRepository) Latest(_ context.Context, carNumber int) (telemetry.Event, error) {
+	repository.latestCarNumber = carNumber
+	return repository.latestEvent, repository.latestErr
+}
+
+// newTestApp creates a Fiber application with the same routes and limits as
+// the production service, but with a fake telemetry repository and a
+// configurable readiness check. This allows HTTP tests to verify route
+// behavior without requiring a running PostgreSQL container.
 func newTestApp(readinessError error, telemetryRepository telemetry.Repository) *fiber.App {
 	return New(
 		time.Now(),
@@ -40,6 +51,8 @@ func newTestApp(readinessError error, telemetryRepository telemetry.Repository) 
 	)
 }
 
+// performRequest sends an HTTP request to the Fiber application and returns the
+// response. It also ensures that the response body is closed after the test completes.
 func performRequest(t *testing.T, app *fiber.App, request *http.Request) *http.Response {
 	t.Helper()
 
@@ -79,7 +92,7 @@ func TestHealthzEndpoint(t *testing.T) {
 	response := performRequest(t, app, request)
 
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+		t.Fatalf("status = %d, desired %d", response.StatusCode, http.StatusOK)
 	}
 
 	var body statusResponse
@@ -88,7 +101,7 @@ func TestHealthzEndpoint(t *testing.T) {
 	}
 
 	if body.Status != "ok" {
-		t.Fatalf("status body = %q, want %q", body.Status, "ok")
+		t.Fatalf("status body = %q, desired %q", body.Status, "ok")
 	}
 }
 
@@ -100,7 +113,7 @@ func TestReadyzEndpointReturnsOKWhenDatabaseIsReachable(t *testing.T) {
 	response := performRequest(t, app, request)
 
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+		t.Fatalf("status = %d, desired %d", response.StatusCode, http.StatusOK)
 	}
 }
 
@@ -113,7 +126,7 @@ func TestReadyzEndpointReturnsServiceUnavailableWhenDatabaseIsDown(t *testing.T)
 
 	if response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf(
-			"status = %d, want %d",
+			"status = %d, desired %d",
 			response.StatusCode,
 			http.StatusServiceUnavailable,
 		)
@@ -135,7 +148,7 @@ func TestTelemetryEndpointStoresValidEvent(t *testing.T) {
 
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf(
-			"status = %d, want %d",
+			"status = %d, desired %d",
 			response.StatusCode,
 			http.StatusCreated,
 		)
@@ -143,14 +156,14 @@ func TestTelemetryEndpointStoresValidEvent(t *testing.T) {
 
 	if len(repository.storedEvent) != 1 {
 		t.Fatalf(
-			"stored events = %d, want 1",
+			"stored events = %d, desired 1",
 			len(repository.storedEvent),
 		)
 	}
 
 	if repository.storedEvent[0].CarNumber != 44 {
 		t.Fatalf(
-			"stored car number = %d, want 44",
+			"stored car number = %d, desired 44",
 			repository.storedEvent[0].CarNumber,
 		)
 	}
@@ -181,7 +194,7 @@ func TestTelemetryEndpointRejectsInvalidEventWithoutStoringIt(t *testing.T) {
 
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf(
-			"status = %d, want %d",
+			"status = %d, desired %d",
 			response.StatusCode,
 			http.StatusBadRequest,
 		)
@@ -189,7 +202,7 @@ func TestTelemetryEndpointRejectsInvalidEventWithoutStoringIt(t *testing.T) {
 
 	if len(repository.storedEvent) != 0 {
 		t.Fatalf(
-			"stored events = %d, want 0",
+			"stored events = %d, desired 0",
 			len(repository.storedEvent),
 		)
 	}
@@ -212,9 +225,101 @@ func TestTelemetryEndpointReturnsNotFoundForUnknownCar(t *testing.T) {
 
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf(
-			"status = %d, want %d",
+			"status = %d, desired %d",
 			response.StatusCode,
 			http.StatusNotFound,
+		)
+	}
+}
+
+func TestLatestTelemetryEndpointReturnsMostRecentEvent(t *testing.T) {
+	observedAt := time.Date(2026, time.August, 1, 22, 30, 0, 0, time.UTC)
+
+	repository := &fakeTelemetryRepository{
+		latestEvent: telemetry.Event{
+			CarNumber:     44,
+			ObservedAt:    observedAt,
+			SpeedKPH:      315.7,
+			EngineRPM:     11800,
+			Gear:          7,
+			FuelLiters:    42.3,
+			BrakeTempC:    710.4,
+			TyreTempC:     96.8,
+			SteeringAngle: -4.2,
+		},
+	}
+	app := newTestApp(nil, repository)
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/cars/44/telemetry/latest",
+		nil,
+	)
+	response := performRequest(t, app, request)
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, desired %d", response.StatusCode, http.StatusOK)
+	}
+
+	var body telemetry.Event
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+
+	if body.CarNumber != 44 {
+		t.Fatalf("car number = %d, desired 44", body.CarNumber)
+	}
+
+	if body.SpeedKPH != 315.7 {
+		t.Fatalf("speed = %f, desired %f", body.SpeedKPH, 315.7)
+	}
+
+	if repository.latestCarNumber != 44 {
+		t.Fatalf(
+			"repository car number = %d, desired 44",
+			repository.latestCarNumber,
+		)
+	}
+}
+
+func TestLatestTelemetryEndpointReturnsNotFoundWhenNoTelemetryExists(t *testing.T) {
+	repository := &fakeTelemetryRepository{
+		latestErr: telemetry.ErrTelemetryNotFound,
+	}
+	app := newTestApp(nil, repository)
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/cars/99/telemetry/latest",
+		nil,
+	)
+	response := performRequest(t, app, request)
+
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf(
+			"status = %d, desired %d",
+			response.StatusCode,
+			http.StatusNotFound,
+		)
+	}
+}
+
+func TestLatestTelemetryEndpointRejectsInvalidCarNumber(t *testing.T) {
+	repository := &fakeTelemetryRepository{}
+	app := newTestApp(nil, repository)
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/cars/not-a-number/telemetry/latest",
+		nil,
+	)
+	response := performRequest(t, app, request)
+
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf(
+			"status = %d, desired %d",
+			response.StatusCode,
+			http.StatusBadRequest,
 		)
 	}
 }

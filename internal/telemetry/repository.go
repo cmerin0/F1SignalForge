@@ -10,10 +10,15 @@ import (
 // failure, so the HTTP layer will return 404 rather than 500.
 var ErrRaceCarNotFound = errors.New("race car not found")
 
+// ErrTelemetryNotFound means the car has no telemetry events to return.
+// The HTTP layer will translate it to a 404 response.
+var ErrTelemetryNotFound = errors.New("telemetry not found")
+
 // Repository defines the persistence behavior required by telemetry ingestion.
 // The HTTP package depends on this interface, not on PostgreSQL directly.
 type Repository interface {
 	Store(context.Context, Event) error
+	Latest(context.Context, int) (Event, error)
 }
 
 // RepositoryFunc adapts a function to Repository. It keeps HTTP tests small

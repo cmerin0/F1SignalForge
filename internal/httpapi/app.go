@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"mime"
+	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -89,6 +90,8 @@ func New(
 	// POST /v1/telemetry accepts one JSON object per request and validates its fields.
 	// It does not persist events.
 	app.Post("/v1/telemetry", handleTelemetry(telemetryRepository))
+
+	app.Get("/v1/cars/:carNumber/telemetry/latest", handleLatestTelemetry(telemetryRepository))
 
 	return app
 }
@@ -206,5 +209,44 @@ func handleReadiness(readinessCheck ReadinessChecker) fiber.Handler {
 		return c.JSON(statusResponse{
 			Status: "ready",
 		})
+	}
+}
+
+// handleLatestTelemetry returns the most recent on-track measurement for one
+// F1 car. The latest event is determined by observed_at, not received_at.
+func handleLatestTelemetry(telemetryRepository telemetry.Repository) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		carNumber, err := strconv.Atoi(c.Params("carNumber"))
+		if err != nil || carNumber < 1 || carNumber > 99 {
+			return c.Status(fiber.StatusBadRequest).JSON(errorResponse{
+				Error: "car number must be an integer between 1 and 99",
+			})
+		}
+
+		if telemetryRepository == nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(errorResponse{
+				Error: "telemetry storage is unavailable",
+			})
+		}
+
+		queryContext, cancel := context.WithTimeout(
+			context.Background(),
+			telemetryStoreTimeout,
+		)
+		defer cancel()
+
+		event, err := telemetryRepository.Latest(queryContext, carNumber)
+		if errors.Is(err, telemetry.ErrTelemetryNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(errorResponse{
+				Error: "telemetry not found",
+			})
+		}
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(errorResponse{
+				Error: "could not retrieve telemetry",
+			})
+		}
+
+		return c.JSON(event)
 	}
 }
