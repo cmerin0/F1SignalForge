@@ -48,6 +48,8 @@ func main() {
 	}
 	defer pool.Close()
 
+	telemetryRepository := database.NewTelemetryRepository(pool)
+
 	// Kubernetes sends SIGTERM before ending a pod. Converting it to a context
 	// gives Fiber a clean, testable signal to begin graceful shutdown.
 	gracefulContext, stop := signal.NotifyContext(
@@ -65,7 +67,8 @@ func main() {
 	}
 
 	// Build the Fiber application and record its creation time for /healthz.
-	app := httpapi.New(time.Now(), pool.Ping)
+	// The readiness checker is passed to the application so it can be used by the readyz endpoint.
+	app := httpapi.New(time.Now(), pool.Ping, telemetryRepository)
 
 	logger.Info("starting Fiber API", "address", listenAddress)
 

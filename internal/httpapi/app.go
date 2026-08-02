@@ -17,8 +17,9 @@ import (
 // maxRequestBodyBytes limits telemetry payloads to 64 KiB to protect the API
 // from unexpectedly large request bodies.
 const (
-	maxRequestBodyBytes = 64 * 1024
-	readinessTimeout    = 2 * time.Second
+	maxRequestBodyBytes   = 64 * 1024
+	readinessTimeout      = 2 * time.Second
+	telemetryStoreTimeout = 3 * time.Second
 )
 
 // ReadinessChecker represents a dependency required to serve real traffic.
@@ -40,6 +41,11 @@ type errorResponse struct {
 	Fields telemetry.FieldErrors `json:"fields,omitempty"`
 }
 
+// telemetryResponse confirms that an event has been accepted for storage.
+type telemetryResponse struct {
+	Status string `json:"status"`
+}
+
 // telemetryValidationResponse confirms that an event passed validation. It
 // does not claim that the event has been persisted.
 type telemetryValidationResponse struct {
@@ -48,7 +54,11 @@ type telemetryValidationResponse struct {
 
 // New function is the HTTP application constructor and ensures that server
 // limits and the health, readiness, and telemetry routes are configured.
-func New(startedAt time.Time, readinessChecker ReadinessChecker) *fiber.App {
+func New(
+	startedAt time.Time,
+	readinessChecker ReadinessChecker,
+	telemetryRepository telemetry.Repository,
+) *fiber.App {
 	app := fiber.New(fiber.Config{
 		AppName: "F1SignalForge",
 
@@ -78,39 +88,63 @@ func New(startedAt time.Time, readinessChecker ReadinessChecker) *fiber.App {
 
 	// POST /v1/telemetry accepts one JSON object per request and validates its fields.
 	// It does not persist events.
-	app.Post("/v1/telemetry", handleTelemetry)
+	app.Post("/v1/telemetry", handleTelemetry(telemetryRepository))
 
 	return app
 }
 
 // handleTelemetry function is the telemetry request handler and ensures that
 // content type, JSON structure, and event values are validated in order.
-func handleTelemetry(c fiber.Ctx) error {
-	if !hasJSONContentType(c) {
-		return c.Status(fiber.StatusUnsupportedMediaType).JSON(errorResponse{
-			Error: "Content-Type must be application/json",
+func handleTelemetry(telemetryRepository telemetry.Repository) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		if !hasJSONContentType(c) {
+			return c.Status(fiber.StatusUnsupportedMediaType).JSON(errorResponse{
+				Error: "Content-Type must be application/json",
+			})
+		}
+
+		event, err := decodeTelemetry(c)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(errorResponse{
+				Error: "invalid JSON body",
+			})
+		}
+
+		if fieldErrors := event.Validate(time.Now().UTC()); fieldErrors != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(errorResponse{
+				Error:  "validation failed",
+				Fields: fieldErrors,
+			})
+		}
+
+		if telemetryRepository == nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(errorResponse{
+				Error: "telemetry storage is unavailable",
+			})
+		}
+
+		storeContext, cancel := context.WithTimeout(
+			context.Background(),
+			telemetryStoreTimeout,
+		)
+		defer cancel()
+
+		if err := telemetryRepository.Store(storeContext, event); err != nil {
+			if errors.Is(err, telemetry.ErrRaceCarNotFound) {
+				return c.Status(fiber.StatusNotFound).JSON(errorResponse{
+					Error: "race car not found",
+				})
+			}
+
+			return c.Status(fiber.StatusInternalServerError).JSON(errorResponse{
+				Error: "could not store telemetry",
+			})
+		}
+
+		return c.Status(fiber.StatusCreated).JSON(telemetryResponse{
+			Status: "accepted",
 		})
 	}
-
-	event, err := decodeTelemetry(c)
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(errorResponse{
-			Error: "invalid JSON body",
-		})
-	}
-
-	if fieldErrors := event.Validate(time.Now().UTC()); fieldErrors != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(errorResponse{
-			Error:  "validation failed",
-			Fields: fieldErrors,
-		})
-	}
-
-	// PostgreSQL persistence is intentionally deferred. This response confirms
-	// validation only and does not falsely claim the event was stored.
-	return c.Status(fiber.StatusOK).JSON(telemetryValidationResponse{
-		Status: "validated",
-	})
 }
 
 // hasJSONContentType function checks the request media type and ensures that
