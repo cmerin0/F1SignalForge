@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: f1signalforge
+  labels:
+    app.kubernetes.io/part-of: f1signalforge
+spec: {}
+status: {}

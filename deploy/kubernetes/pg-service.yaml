@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: f1signalforge
+  name: f1signalforge-pg
+  namespace: f1signalforge
+spec:
+# A headless Service gives the StatefulSet a stable internal hostname.
+  clusterIP: None
+
+  selector:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: f1signalforge
+
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
